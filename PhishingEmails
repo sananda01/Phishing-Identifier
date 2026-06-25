@@ -1,0 +1,353 @@
+import kagglehub
+from kagglehub import KaggleDatasetAdapter
+import pandas as pd
+import re
+from sklearn.model_selection import train_test_split
+from imblearn.over_sampling import SMOTE # Commented out as SMOTE requires multiple classes
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
+from matplotlib import pyplot as plt
+from sklearn import metrics
+from sklearn.metrics import accuracy_score
+import seaborn as sns
+from sklearn.metrics import confusion_matrix as cnf_matrix
+from sklearn.metrics import classification_report
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.ensemble import RandomForestClassifier as rf
+from sklearn.model_selection import GridSearchCV
+from sklearn.model_selection import RandomizedSearchCV
+from scipy.stats import uniform
+import csv
+
+# Load dataset
+path = kagglehub.dataset_download("naserabdullahalam/phishing-email-dataset")
+
+# Step 2: Inspect the first few lines of the CSV to check its structure
+csv_path = f"{path}/phishing_email.csv"
+with open(csv_path, "r", encoding="latin1") as f:
+    for i in range(5):  # print the first 5 lines
+        print(f.readline())
+
+with open(csv_path, "r", encoding="latin1") as f:
+    sample = f.read(2048)
+    sniffer = csv.Sniffer()
+    try:
+        dialect = sniffer.sniff(sample)
+        sep = dialect.delimiter
+    except csv.Error:
+        sep = ","  # fallback if detection fails
+print(f"Detected separator: '{sep}'")
+
+df = pd.read_csv(csv_path, encoding="latin1", sep=",", on_bad_lines="skip")
+# Handle missing data - using 'text_combined' as the relevant column
+df = df.dropna(subset=['text_combined'])
+# No need to fillna for 'subject' as it's not a separate column
+
+# Cleaning function
+def clean_text(text):
+    text = text.lower()
+    text = re.sub(r'<.*?>', ' ', text)            # remove HTML tags
+    text = re.sub(r'http\S+|www.\S+', 'url', text) # replace URLs
+    text = re.sub(r'\d+', ' number ', text)        # replace numbers
+    text = re.sub(r'[^a-z\s]', ' ', text)          # remove punctuation
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+# Apply cleaning to 'text_combined'
+df['clean_text_combined'] = df['text_combined'].astype(str).apply(clean_text)
+
+# No need to merge subject and body as they are already combined
+
+# TF-IDF vectorization
+vectorizer = TfidfVectorizer(max_features=5000)
+X = vectorizer.fit_transform(df['clean_text_combined'])  # numeric features
+y = df['label']
+
+
+# Handle class imbalance with SMOTE (requires more than 1 class in y)
+# If you had multiple classes in 'label', you could use SMOTE like this:
+# from imblearn.over_sampling import SMOTE
+# smote = SMOTE(random_state=42)
+# X_resampled, y_resampled = smote.fit_resample(X, y)
+# print("After SMOTE:", pd.Series(y_resampled).value_counts())
+
+# For now, we will proceed without SMOTE since there's only one class or to keep it simple
+X_processed = X
+y_processed = y
+
+# Now you can use X_processed and y_processed for training your model
+# For example, splitting into training and testing sets:
+X_train, X_test, y_train, y_test = train_test_split(
+    X_processed, y_processed,
+    test_size=0.2,
+    random_state=42,
+    stratify=y_processed if len(y_processed.unique()) > 1 else None
+)
+
+# Apply SMOTE only if multiple classes exist
+if len(y_train.unique()) > 1:
+    smote = SMOTE(random_state=42)
+    X_train_resampled, y_train_resampled = smote.fit_resample(X_train, y_train)
+    #print("Before SMOTE:", y_train.value_counts())
+    #print("After SMOTE:", pd.Series(y_train_resampled).value_counts())
+else:
+    X_train_resampled, y_train_resampled = X_train, y_train
+    #print("SMOTE skipped: only one class in training data")
+
+#print("Vocabulary size:", len(vectorizer.get_feature_names_out()))
+#print("Sample TF-IDF Representation:")
+#print(X_processed[:5])
+
+##########
+##LOGREG##
+##########
+logreg=LogisticRegression(solver='liblinear', random_state=16)
+
+param_grid = {
+    "max_iter":[100,110,120,130,140,150,160,170,180],
+    "C": [1.0,1.5,2.0,2.5,3.0,3.5,4.0,4.5,5.0]
+}
+
+randomlg=RandomizedSearchCV(
+  estimator=logreg,
+  param_distributions=param_grid,
+  cv=3,
+  n_iter=50,
+  random_state=42)
+
+randomlg.fit(X_train_resampled, y_train_resampled)
+
+best_score=randomlg.best_score_
+best_params=randomlg.best_params_
+best_model=randomlg.best_estimator_
+result=randomlg.cv_results_
+
+print("Best CV Score (LG): %.4f" % best_score)
+print("Best Parameters (LG):", best_params)
+
+y_pred = randomlg.predict(X_test)
+
+accuracy = accuracy_score(y_test, y_pred)
+print("Accuracy on test set:", accuracy)
+print(classification_report(y_test, y_pred))
+
+
+#precision is the answer of "of all of the items that the model labelled as positive, how many of them were actually positive?"
+#recall is the answer of "out of the actual positives, how many did the model identify?"
+#f1 balances how many phishing emails you correctly catch (recall) with how many you accidentally mislabel as phishing (precision).
+
+#print the confusion matrix to check for false positives and true negatives, etc
+cnf=cnf_matrix(y_test, y_pred)
+sns.heatmap(cnf, annot=True, cmap="YlGnBu" ,fmt='g')
+plt.tight_layout()
+plt.title('Confusion matrix', y=1.1)
+plt.ylabel('Actual label')
+plt.xlabel('Predicted label')
+plt.show()
+
+
+y_pred_proba = randomlg.predict_proba(X_test)[::,1]
+fpr_logreg, tpr_logreg, _ = metrics.roc_curve(y_test,  y_pred_proba)
+auc_logreg = metrics.roc_auc_score(y_test, y_pred_proba)
+plt.plot(fpr_logreg,tpr_logreg,label=f"LogReg (AUC={auc_logreg:.2f})")
+plt.xlabel("False Positive Rate")
+plt.ylabel("True Positive Rate")
+plt.title("ROC Curve Comparison")
+plt.legend(loc="lower right")
+plt.show()
+
+###############
+##NAIVE BAYES##
+###############
+
+nb=MultinomialNB()
+
+param_grid = {
+    "alpha": uniform(0.1,2.0),
+    "fit_prior": [True,False]
+    }
+
+randomnb=RandomizedSearchCV(
+  estimator=nb,
+  param_distributions=param_grid,
+  cv=3,
+  n_iter=50,
+  random_state=42)
+
+randomnb.fit(X_train_resampled,y_train_resampled)
+
+best_score=randomnb.best_score_
+best_params=randomnb.best_params_
+best_model=randomnb.best_estimator_
+result=randomnb.cv_results_
+
+print("Best CV Score (NB): %.4f" % best_score)
+print("Best Parameters (NB):", best_params)
+      
+y_pred=randomnb.predict(X_test)
+
+accuracy=accuracy_score(y_test, y_pred)
+print("Accuracy for Naive Bayes " + str(accuracy))
+
+print("Classification Report:")
+print(classification_report(y_test, y_pred))
+
+cnf=cnf_matrix(y_test, y_pred)
+sns.heatmap(cnf, annot=True, cmap="YlGnBu" ,fmt='g')
+plt.tight_layout()
+plt.title('Confusion matrix', y=1.1)
+plt.ylabel('Actual label')
+plt.xlabel('Predicted label')
+plt.show()
+
+y_pred_proba = randomnb.predict_proba(X_test)[::,1]
+fpr_nb, tpr_nb, _ = metrics.roc_curve(y_test,  y_pred_proba)
+auc_nb = metrics.roc_auc_score(y_test, y_pred_proba)
+plt.plot(fpr_nb,tpr_nb,label=f"NB (AUC={auc_nb:.2f})")
+plt.xlabel("False Positive Rate")
+plt.ylabel("True Positive Rate")
+plt.title("ROC Curve Comparison")
+plt.legend(loc="lower right")
+plt.show()
+
+
+#################
+##RANDOM FOREST##
+#################
+
+rf_model=rf(random_state=42)
+param_grid={
+     "n_estimators":[100,200,300,400,500], 
+     "max_features":["sqrt", "auto"],
+     "max_depth":  [5,10,15,20,25],
+     "max_leaf_nodes": [5,10,15,20,25]
+}
+
+
+randomrf=RandomizedSearchCV(
+    estimator=rf_model,
+    param_distributions=param_grid,
+    cv=3,
+    n_iter=50,
+    random_state=42
+)
+
+randomrf.fit(X_train_resampled, y_train_resampled)
+y_pred=randomrf.predict(X_test)
+
+accuracy=accuracy_score(y_test,y_pred)
+print("Accuracy for Random Forest " + str(accuracy))
+
+print("Classification Report:")
+print(classification_report(y_test, y_pred))
+
+cnf=cnf_matrix(y_test, y_pred)
+sns.heatmap(cnf, annot=True, cmap="YlGnBu" ,fmt='g')
+plt.tight_layout()
+plt.title('Confusion matrix', y=1.1)
+plt.ylabel('Actual label')
+plt.xlabel('Predicted label')
+plt.show()
+
+
+y_pred_proba = randomrf.predict_proba(X_test)[::,1]
+fpr_rf, tpr_rf, _ = metrics.roc_curve(y_test,  y_pred_proba)
+auc_rf = metrics.roc_auc_score(y_test, y_pred_proba)
+plt.plot(fpr_rf,tpr_rf,label=f"RF (AUC={auc_rf:.2f})")
+plt.xlabel("False Positive Rate")
+plt.ylabel("True Positive Rate")
+plt.title("ROC Curve Comparison")
+plt.legend(loc="lower right")
+plt.show()
+
+
+#plot to show all of the models next to each other using a AUC-ROC curve
+plt.plot(fpr_logreg,tpr_logreg,label=f"LogReg (AUC={auc_logreg:.2f})")
+plt.plot(fpr_nb,tpr_nb,color='darkorange', label=f"NB (AUC={auc_nb:.2f})")
+plt.plot(fpr_rf,tpr_rf,color='navy', label=f"RF (AUC={auc_rf:.2f})")
+plt.xlabel("False Positive Rate")
+plt.ylabel("True Positive Rate")
+plt.title("ROC Curve Comparison")
+plt.legend(loc="lower right")
+
+
+#########
+##INPUT##
+#########
+
+def lg_prediction(email_vectorized):
+    prediction=randomlg.predict(email_vectorized)[0]
+    problg = randomlg.predict_proba(email_vectorized)[0][1]
+    if prediction==1:
+        invalid=True
+    else:
+        invalid=False
+    return(invalid, problg)
+
+def nb_prediction(email_vectorized):
+    prediction=randomnb.predict(email_vectorized)[0]
+    probnb = randomnb.predict_proba(email_vectorized)[0][1]
+    if prediction==1:
+        invalid=True
+    else:
+        invalid=False
+    return(invalid, probnb)
+
+def rf_prediction(email_vectorized):
+    prediction=randomrf.predict(email_vectorized)[0]
+    probrf = randomrf.predict_proba(email_vectorized)[0][1]
+    if prediction==1:
+        invalid=True
+    else:
+        invalid=False
+    return(invalid, probrf)
+
+def all_prediction(email_vectorized):
+    legit=0
+    pred_logreg=randomlg.predict(email_vectorized)[0]
+    problg = randomlg.predict_proba(email_vectorized)[0][1]
+    pred_nb=randomnb.predict(email_vectorized)[0]
+    probnb = randomnb.predict_proba(email_vectorized)[0][1]
+    pred_rf=randomrf.predict(email_vectorized)[0]
+    probrf = randomrf.predict_proba(email_vectorized)[0][1]
+    w_lg = 0.4  # 40% influence
+    w_nb = 0.4  # 40% influence
+    w_rf = 0.2  # 20% influence
+    total_prob= (problg*w_lg) + (probnb*w_nb) + (probrf*w_rf)
+    if total_prob >= 0.5:
+        invalid=True
+    else:
+        invalid=False
+    return(invalid, total_prob)
+
+again="yes"
+
+while again.lower()=="yes":
+    input_email=input("Enter the email: ")
+    email=clean_text(input_email)
+    email_vectorized= vectorizer.transform([email])
+    mode=input("Choose a model: Logreg, NB, RF or 'All' if all of them: ")
+
+    if mode.lower()=="logreg":
+        result, probability=lg_prediction(email_vectorized)
+
+    elif mode.lower()=="nb":
+        result, probability=nb_prediction(email_vectorized)
+
+    elif mode.lower()=="rf":
+        result, probability=rf_prediction(email_vectorized)
+
+    elif mode.lower()=="all":
+        result, probability=all_prediction(email_vectorized)
+    
+    else:
+        print("Invalid model choice. Please choose Logreg, NB, RF, or All.")
+    
+    probability=probability*100
+
+    if result==True:
+        print("The email is predicted to be a Phishing email with a probability of " + str(probability)+ " %")
+    else:
+        print("The email is predicted to be a Legitimate email with a probability of " + str(100-probability) + " %")
+
+    again=input("Do you want to analyse another email? (yes/no): ")
